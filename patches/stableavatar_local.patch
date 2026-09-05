@@ -1,0 +1,35 @@
+diff --git a/StableAvatar/wan/pipeline/wan_inference_long_pipeline.py b/StableAvatar/wan/pipeline/wan_inference_long_pipeline.py
+index d91ea6e..ee08f97 100644
+--- a/StableAvatar/wan/pipeline/wan_inference_long_pipeline.py
++++ b/StableAvatar/wan/pipeline/wan_inference_long_pipeline.py
+@@ -918,6 +918,10 @@ def apply_scale_to_latent(latent, mean, std_inv):
+     std_inv: StableAvatar VAE的1/std参数 [C]
+     """
+     # 反标准化: z = z / (1/std) + mean
++    # Device/dtype alignment: the latent arrives on cuda while mean/std_inv can sit on
++    # cpu (offload path) -> "Expected all tensors to be on the same device" (job 1014).
++    mean = mean.to(device=latent.device, dtype=latent.dtype)
++    std_inv = std_inv.to(device=latent.device, dtype=latent.dtype)
+     scaled_latent = latent / std_inv.view(1, -1, 1, 1, 1) + mean.view(1, -1, 1, 1, 1)
+     return scaled_latent
+ 
+diff --git a/StableAvatar_node.py b/StableAvatar_node.py
+index d69b82d..e03dada 100644
+--- a/StableAvatar_node.py
++++ b/StableAvatar_node.py
+@@ -170,10 +170,11 @@ class StableAvatar_Predata:
+             if waveform.shape[1] > max_samples:
+                 waveform = waveform[:, :max_samples]
+ 
+-        buff = io.BytesIO()
+-        torchaudio.save(buff, waveform, sample_rate, format="FLAC")
+-        with open(audio_file, 'wb') as f:
+-            f.write(buff.getbuffer())
++        # torchaudio >= 2.9 routes save() through torchcodec, which cannot encode into a
++        # BytesIO (format comes from the file extension only) — save straight to the
++        # temp path instead. It writes PCM WAV (matching the .wav name), which every
++        # downstream loader here reads fine; the old code wrote FLAC bytes into a .wav.
++        torchaudio.save(audio_file, waveform, sample_rate)
+             
+         # get vocal if infer a song
+         if audio_separator:

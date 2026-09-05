@@ -1,0 +1,21 @@
+diff --git a/EchoMimic_node.py b/EchoMimic_node.py
+index 7e18b28..5f7df6f 100644
+--- a/EchoMimic_node.py
++++ b/EchoMimic_node.py
+@@ -186,11 +186,11 @@ class Echo_Predata:
+         #pre audio
+         audio_file_prefix = ''.join(random.choice("0123456789") for _ in range(6))
+         audio_file = os.path.join(folder_paths.get_input_directory(), f"audio_{audio_file_prefix}_temp.wav")
+-        buff = io_base.BytesIO()
+-   
+-        torchaudio.save(buff, audio["waveform"].squeeze(0), audio["sample_rate"], format="FLAC")
+-        with open(audio_file, 'wb') as f:
+-            f.write(buff.getbuffer())
++        # torchaudio >= 2.9 routes save() through torchcodec, which cannot encode into a
++        # BytesIO (format comes from the file extension only) — save straight to the
++        # temp path instead. It writes PCM WAV (matching the .wav name), which every
++        # downstream loader here reads fine; the old code wrote FLAC bytes into a .wav.
++        torchaudio.save(audio_file, audio["waveform"].squeeze(0), audio["sample_rate"])
+ 
+         # pre data
+         if "V1"==version :

@@ -38,3 +38,51 @@ EXPOSE 8188
 # Same flags as the local compose service, minus --extra-model-paths-config:
 # the network volume mounts straight at /ComfyUI/models.
 CMD ["python3", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--cache-lru", "2", "--reserve-vram", "1"]
+
+# --- Solo avatar bake-off node packs (mirror of the local Dockerfile's bake-off
+# section, adapted for a fully-baked image: the local dev image bind-mounts the
+# node FILES and bakes only the deps; here BOTH are baked). Cloned at the exact
+# commits the local working trees run, then the three local fixes are applied:
+#   patches/stableavatar_local.patch — apply_scale_to_latent device/dtype align
+#     (job 1014) + torchaudio>=2.9 save-to-path (torchcodec can't encode BytesIO)
+#   patches/echomimic_local.patch    — same torchaudio save fix
+#   overlay/.../echomimic_v3/src/dist/ — the xfuser shim (dist/ is gitignored
+#     upstream, so a clone lacks it and the V3 import chain dies without it)
+ARG STABLEAVATAR_COMMIT=65fdb640969999c3187dcaa17b3ec819a1398596
+ARG ECHOMIMIC_COMMIT=3a36b00f405e0578db1f2c048b3ad0e41ff091bd
+RUN git clone https://github.com/smthemex/ComfyUI_StableAvatar /ComfyUI/custom_nodes/ComfyUI_StableAvatar && \
+    git -C /ComfyUI/custom_nodes/ComfyUI_StableAvatar checkout ${STABLEAVATAR_COMMIT} && \
+    git clone https://github.com/smthemex/ComfyUI_EchoMimic /ComfyUI/custom_nodes/ComfyUI_EchoMimic && \
+    git -C /ComfyUI/custom_nodes/ComfyUI_EchoMimic checkout ${ECHOMIMIC_COMMIT}
+COPY patches/stableavatar_local.patch patches/echomimic_local.patch /tmp/
+COPY overlay/ComfyUI_EchoMimic/echomimic_v3/src/dist/ /ComfyUI/custom_nodes/ComfyUI_EchoMimic/echomimic_v3/src/dist/
+RUN git -C /ComfyUI/custom_nodes/ComfyUI_StableAvatar apply /tmp/stableavatar_local.patch && \
+    git -C /ComfyUI/custom_nodes/ComfyUI_EchoMimic apply /tmp/echomimic_local.patch && \
+    rm /tmp/stableavatar_local.patch /tmp/echomimic_local.patch
+
+# Bake-off pip deps — same layers/pins/rationale as the local Dockerfile (see it
+# for the full comments; the load-bearing pins:)
+#   mediapipe==0.10.21 — last release with the legacy `mediapipe.solutions` API
+#     EchoMimic imports at module load (1.0.1 and late 0.10.3x both break it)
+#   eva-decord — decord fork with cp312 wheels (v3 flash path module-load import)
+RUN python3 -m pip install omegaconf librosa moviepy easydict timm tomesd \
+        torchdiffeq torchsde albumentations beautifulsoup4 \
+        ffmpeg-python "mediapipe==0.10.21" ultralytics av lpips torchmetrics torchtyping IPython \
+        eva-decord mmgp
+
+# retina-face (EchoMimic V3 ip-mask face detection): tf.keras codebase on py3.12 ->
+# tensorflow-cpu + tf-keras + TF_USE_LEGACY_KERAS=1; --no-deps so pip never drags
+# GPU tensorflow; weights pre-baked (no runtime download on a fresh pod).
+RUN python3 -m pip install tensorflow-cpu tf-keras gdown && \
+    python3 -m pip install --no-deps retina-face
+ENV TF_USE_LEGACY_KERAS=1
+RUN mkdir -p /root/.deepface/weights && \
+    wget -q -O /root/.deepface/weights/retinaface.h5 \
+      https://github.com/serengil/deepface_models/releases/download/v1.0/retinaface.h5
+
+# torchaudio >= 2.11 routes save() through torchcodec (lazy import) — 0.16.0
+# supports torch >= 2.11 and pulls no deps of its own (local Dockerfile, jobs 900/901).
+RUN python3 -m pip install torchcodec==0.16.0
+
+# Import-chain stragglers traced from both packs' module-level imports (local Dockerfile).
+RUN python3 -m pip install loguru matplotlib scikit-image onnxruntime

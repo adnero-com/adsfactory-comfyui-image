@@ -31,25 +31,29 @@ RUN python3 -m pip install ftfy "accelerate>=1.2.1" "diffusers>=0.33.0" "peft>=0
         "sentencepiece>=0.2.0" protobuf pyloudnorm "gguf>=0.17.1" scipy GitPython toml
 
 # --- SageAttention 2.2 (near-lossless attention speedup) -----------------------------
-# This image ships to the RunPod B200 ONLY (sm_100, datacenter Blackwell); the local
-# 5090 has its own separate compose and is out of scope, so this is a SINGLE-ARCH
-# sm_100 build. Built FROM SOURCE (no Linux/py312/cu130/sm_100 prebuilt wheel exists --
-# every prebuilt is Windows + sm_120-only; the maintainers say B200 must be built from
-# source). Enables the WanVideoWrapper acceleration levers (attention_mode=sageattn /
-# radial_sage_attention, + torch.compile via Triton). See
+# HOPPER (sm_90: H200 / H100) SINGLE-ARCH build. History: the first cut targeted the
+# B200 (sm_100) and the kernels COMPILED (setup.py main has HAS_SM100), but the 2.2
+# public API never dispatches them -- core.py's sageattn() routes sm80/86/89/90/120/121
+# and raises `Unsupported CUDA architecture: sm100` at the first attention call
+# (canary job 34). So sage renders run on Hopper pods; the local 5090 has its own
+# separate compose and is out of scope. Built FROM SOURCE (no Linux/py312/cu130
+# prebuilt wheel). Enables the WanVideoWrapper acceleration levers (attention_mode=
+# sageattn / radial_sage_attention, + torch.compile via Triton). See
 # docs/design/sageattention-blackwell-build.md.
-#   * Pinned to a `main` COMMIT, not the v2.2.0 tag: the tag's setup.py has no sm_100
-#     branch (drops "10.0"); main added HAS_SM100 (num "100a") so the B200 kernels
-#     actually compile. Version string is still 2.2.0 (2++, recommended over Sage3 for
-#     precision-sensitive video).
-#   * TORCH_CUDA_ARCH_LIST="10.0" -> sm_100 ONLY (single arch: ~half the kernels of a
-#     dual-arch build, so far lighter to compile). setup.py splits ";"/","; a bare
-#     "10.0" is the one B200 target.
+#   * Pinned `main` COMMIT (== latest at research time). Version string 2.2.0 (2++,
+#     recommended over Sage3 for precision-sensitive video).
+#   * TORCH_CUDA_ARCH_LIST="9.0" -> sm_90 ONLY: setup.py maps 9.0 -> HAS_SM90 with
+#     gencode compute_90a/sm_90a (Hopper wgmma) and builds the sm90 kernel set
+#     (_qattn_sm90: pybind_sm90.cpp + qk_int_sv_f8_cuda_sm90.cu) plus the shared
+#     int8/fp8 extensions. Needs CUDA >= 12.3 (we install 13.0).
 #   * RUNTIME backend: the render selects sage via WanVideoWrapper's attention_mode
-#     (its own attention.py calls sage's `sageattn` AUTO dispatcher -- NOT the
-#     hardcoded qk_int8_pv_fp16_cuda backend, NOT the `--use-sage-attention` Triton
-#     flag; both are known to abort/blacken on Wan). Triton ships with torch's cu130
-#     wheels (pytorch-triton) -- also what WanVideoTorchCompile needs.
+#     (its own attention.py calls sage's `sageattn` AUTO dispatcher -- NOT a
+#     hardcoded backend, NOT the `--use-sage-attention` Triton flag; both are known
+#     to abort/blacken on Wan). On sm_90 the dispatcher calls
+#     sageattn_qk_int8_pv_fp8_cuda_sm90 with pv_accum_dtype="fp32+fp32" -- the most
+#     accurate accumulation path in core.py, so no accuracy patch is needed. Triton
+#     ships with torch's cu130 wheels (pytorch-triton) -- also what
+#     WanVideoTorchCompile needs.
 #   * nvcc matching torch's cu130 ABI: install just the CUDA 13.0 compiler + runtime-dev
 #     + math-lib dev headers (cuda-nvcc + cuda-cudart-dev + cuda-libraries-dev; the last
 #     for torch's ATen headers which #include <cusparse.h>/<cublas...>, though sage's own
@@ -60,7 +64,9 @@ RUN python3 -m pip install ftfy "accelerate>=1.2.1" "diffusers>=0.33.0" "peft>=0
 #   * MAX_JOBS=1: fp8/int8 kernels are RAM-heavy; the ubuntu-latest CI runner (~7GB)
 #     OOMs with parallel nvcc. Serial compile + the workflow's swapfile step keeps it in
 #     memory (single-arch already halves the load). Raise on a big-RAM builder.
-# Sage correctness on the B200 (sm_100) is UNPROVEN -> validate with a render whose
+# Sage correctness on Hopper still needs eyeballing: wrapper issue #1554 reported
+# pure-noise output on an H100 with WanVideo (though with older builds/backends; our
+# dispatcher path is the fp32+fp32 sm90 kernel) -> validate with a render whose
 # OUTPUT IS VISUALLY CORRECT before trusting it; SDPA is the default fallback.
 ARG SAGEATTENTION_COMMIT=d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
 ENV CUDA_HOME=/usr/local/cuda-13.0
@@ -70,7 +76,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git clone https://github.com/thu-ml/SageAttention /tmp/SageAttention \
     && git -C /tmp/SageAttention checkout ${SAGEATTENTION_COMMIT} \
     && sed -i 's/c++17/c++20/g' /tmp/SageAttention/setup.py \
-    && TORCH_CUDA_ARCH_LIST="10.0" EXT_PARALLEL=1 NVCC_APPEND_FLAGS="--threads 4" MAX_JOBS=1 \
+    && TORCH_CUDA_ARCH_LIST="9.0" EXT_PARALLEL=1 NVCC_APPEND_FLAGS="--threads 4" MAX_JOBS=1 \
        PATH=${CUDA_HOME}/bin:${PATH} \
        python3 -m pip install /tmp/SageAttention --no-build-isolation \
     && rm -rf /tmp/SageAttention

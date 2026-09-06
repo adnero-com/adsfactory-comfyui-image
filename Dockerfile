@@ -74,7 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        PATH=${CUDA_HOME}/bin:${PATH} \
        python3 -m pip install /tmp/SageAttention --no-build-isolation \
     && rm -rf /tmp/SageAttention
-RUN python3 -c "import triton, sageattention; from sageattention import sageattn; print('sageattention', sageattention.__version__, 'triton', triton.__version__)"
+RUN python3 -c "import triton, sageattention; from sageattention import sageattn; from importlib.metadata import version; print('sageattention', version('sageattention'), 'triton', triton.__version__)"
 
 # The custom_nodes tree itself (bind-mounted locally; baked here for RunPod).
 ADD custom_nodes.tar.gz /ComfyUI/

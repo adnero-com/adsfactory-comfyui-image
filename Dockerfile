@@ -30,6 +30,52 @@ RUN python3 -m pip install opencv-python imageio-ffmpeg einops kornia scikit-bui
 RUN python3 -m pip install ftfy "accelerate>=1.2.1" "diffusers>=0.33.0" "peft>=0.17.0" \
         "sentencepiece>=0.2.0" protobuf pyloudnorm "gguf>=0.17.1" scipy GitPython toml
 
+# --- SageAttention 2.2 (near-lossless attention speedup) -----------------------------
+# This image ships to the RunPod B200 ONLY (sm_100, datacenter Blackwell); the local
+# 5090 has its own separate compose and is out of scope, so this is a SINGLE-ARCH
+# sm_100 build. Built FROM SOURCE (no Linux/py312/cu130/sm_100 prebuilt wheel exists --
+# every prebuilt is Windows + sm_120-only; the maintainers say B200 must be built from
+# source). Enables the WanVideoWrapper acceleration levers (attention_mode=sageattn /
+# radial_sage_attention, + torch.compile via Triton). See
+# docs/design/sageattention-blackwell-build.md.
+#   * Pinned to a `main` COMMIT, not the v2.2.0 tag: the tag's setup.py has no sm_100
+#     branch (drops "10.0"); main added HAS_SM100 (num "100a") so the B200 kernels
+#     actually compile. Version string is still 2.2.0 (2++, recommended over Sage3 for
+#     precision-sensitive video).
+#   * TORCH_CUDA_ARCH_LIST="10.0" -> sm_100 ONLY (single arch: ~half the kernels of a
+#     dual-arch build, so far lighter to compile). setup.py splits ";"/","; a bare
+#     "10.0" is the one B200 target.
+#   * RUNTIME backend: the render selects sage via WanVideoWrapper's attention_mode
+#     (its own attention.py calls sage's `sageattn` AUTO dispatcher -- NOT the
+#     hardcoded qk_int8_pv_fp16_cuda backend, NOT the `--use-sage-attention` Triton
+#     flag; both are known to abort/blacken on Wan). Triton ships with torch's cu130
+#     wheels (pytorch-triton) -- also what WanVideoTorchCompile needs.
+#   * nvcc matching torch's cu130 ABI: install just the CUDA 13.0 compiler + runtime-dev
+#     + math-lib dev headers (cuda-nvcc + cuda-cudart-dev + cuda-libraries-dev; the last
+#     for torch's ATen headers which #include <cusparse.h>/<cublas...>, though sage's own
+#     kernels use none of cub/thrust/cublas -- this avoids the full toolkit's
+#     nsight/openjdk ~4GB) + python3-dev (Python.h, missing on the runtime base).
+#   * torch 2.14's ATen headers REQUIRE C++20 but sage hardcodes -std=c++17; sed it to
+#     c++20 before building (ubuntu24.04 host g++ 13 supports it).
+#   * MAX_JOBS=1: fp8/int8 kernels are RAM-heavy; the ubuntu-latest CI runner (~7GB)
+#     OOMs with parallel nvcc. Serial compile + the workflow's swapfile step keeps it in
+#     memory (single-arch already halves the load). Raise on a big-RAM builder.
+# Sage correctness on the B200 (sm_100) is UNPROVEN -> validate with a render whose
+# OUTPUT IS VISUALLY CORRECT before trusting it; SDPA is the default fallback.
+ARG SAGEATTENTION_COMMIT=d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
+ENV CUDA_HOME=/usr/local/cuda-13.0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cuda-nvcc-13-0 cuda-cudart-dev-13-0 cuda-libraries-dev-13-0 python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone https://github.com/thu-ml/SageAttention /tmp/SageAttention \
+    && git -C /tmp/SageAttention checkout ${SAGEATTENTION_COMMIT} \
+    && sed -i 's/c++17/c++20/g' /tmp/SageAttention/setup.py \
+    && TORCH_CUDA_ARCH_LIST="10.0" EXT_PARALLEL=1 NVCC_APPEND_FLAGS="--threads 4" MAX_JOBS=1 \
+       PATH=${CUDA_HOME}/bin:${PATH} \
+       python3 -m pip install /tmp/SageAttention --no-build-isolation \
+    && rm -rf /tmp/SageAttention
+RUN python3 -c "import triton, sageattention; from sageattention import sageattn; print('sageattention', sageattention.__version__, 'triton', triton.__version__)"
+
 # The custom_nodes tree itself (bind-mounted locally; baked here for RunPod).
 ADD custom_nodes.tar.gz /ComfyUI/
 

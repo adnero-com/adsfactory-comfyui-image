@@ -23,6 +23,20 @@ jobs:
           sudo docker system prune -af || true
           df -h /
 
+      # SageAttention's 2-arch (sm_120 + sm_100) fp8/int8 kernels are RAM-heavy to
+      # compile; the ~7GB runner OOMs even at MAX_JOBS=1 without extra swap. Add a
+      # large swapfile (host swap is available to the buildkit RUN steps) so nvcc
+      # spills instead of getting OOM-killed. (Freed disk above leaves room.)
+      - name: Add swap for the CUDA compile
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          sudo fallocate -l 16G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
       - uses: actions/checkout@v4
 
       - name: Log in to GHCR

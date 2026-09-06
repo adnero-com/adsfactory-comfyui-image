@@ -34,10 +34,18 @@ RUN python3 -m pip install ftfy "accelerate>=1.2.1" "diffusers>=0.33.0" "peft>=0
 ADD custom_nodes.tar.gz /ComfyUI/
 
 WORKDIR /ComfyUI
-EXPOSE 8188
-# Same flags as the local compose service, minus --extra-model-paths-config:
-# the network volume mounts straight at /ComfyUI/models.
-CMD ["python3", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--cache-lru", "2", "--reserve-vram", "1"]
+# Batch-parallel rendering (adsfactory Phase 7): COMFY_INSTANCES (pod env,
+# default 1 -- unchanged single-process behaviour) spawns that many independent
+# ComfyUI processes on ports 8188.. , each with its own input/output/user/temp
+# dir (models stay shared, read from the network volume) so adsfactory's
+# providers/gpu_slots.py can route N concurrent renders to N different
+# instances with zero filename-collision risk. See entrypoint.sh.
+EXPOSE 8188-8195
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+# Same flags as the pre-existing single-instance CMD, now the per-instance
+# default inside entrypoint.sh (COMFY_EXTRA_ARGS overrides it).
+CMD ["/entrypoint.sh"]
 
 # --- Solo avatar bake-off node packs (mirror of the local Dockerfile's bake-off
 # section, adapted for a fully-baked image: the local dev image bind-mounts the

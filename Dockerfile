@@ -64,6 +64,11 @@ RUN python3 -m pip install ftfy "accelerate>=1.2.1" "diffusers>=0.33.0" "peft>=0
 #   * MAX_JOBS=1: fp8/int8 kernels are RAM-heavy; the ubuntu-latest CI runner (~7GB)
 #     OOMs with parallel nvcc. Serial compile + the workflow's swapfile step keeps it in
 #     memory (single-arch already halves the load). Raise on a big-RAM builder.
+#   * LIBRARY_PATH=${CUDA_HOME}/lib64/stubs: _qattn_sm90 is the one extension that
+#     links -lcuda (the CUDA DRIVER library -- its TMA/CUtensorMap path uses the
+#     driver API); a GPU-less builder has no driver, so link against the stub that
+#     cuda-driver-dev ships (same trick NVIDIA's own -devel images use). At runtime
+#     the pod's NVIDIA container runtime injects the real libcuda.so.
 # Sage correctness on Hopper still needs eyeballing: wrapper issue #1554 reported
 # pure-noise output on an H100 with WanVideo (though with older builds/backends; our
 # dispatcher path is the fp32+fp32 sm90 kernel) -> validate with a render whose
@@ -78,6 +83,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && sed -i 's/c++17/c++20/g' /tmp/SageAttention/setup.py \
     && TORCH_CUDA_ARCH_LIST="9.0" EXT_PARALLEL=1 NVCC_APPEND_FLAGS="--threads 4" MAX_JOBS=1 \
        PATH=${CUDA_HOME}/bin:${PATH} \
+       LIBRARY_PATH=${CUDA_HOME}/lib64/stubs \
        python3 -m pip install /tmp/SageAttention --no-build-isolation \
     && rm -rf /tmp/SageAttention
 RUN python3 -c "import triton, sageattention; from sageattention import sageattn; from importlib.metadata import version; print('sageattention', version('sageattention'), 'triton', triton.__version__)"

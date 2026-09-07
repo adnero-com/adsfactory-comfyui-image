@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test the instance -> port -> GPU mapping
-        run: ./test_entrypoint.sh
+        run: bash ./test_entrypoint.sh
 
   build-and-push:
     needs: entrypoint-test

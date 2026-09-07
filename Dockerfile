@@ -92,19 +92,6 @@ RUN python3 -c "import triton, sageattention; from sageattention import sageattn
 ADD custom_nodes.tar.gz /ComfyUI/
 
 WORKDIR /ComfyUI
-# Batch-parallel rendering (adsfactory Phase 7): COMFY_INSTANCES (pod env,
-# default 1 -- unchanged single-process behaviour) spawns that many independent
-# ComfyUI processes on ports 8188.. , each with its own input/output/user/temp
-# dir (models stay shared, read from the network volume) so adsfactory's
-# providers/gpu_slots.py can route N concurrent renders to N different
-# instances with zero filename-collision risk. See entrypoint.sh.
-EXPOSE 8188-8195
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-# Same flags as the pre-existing single-instance CMD, now the per-instance
-# default inside entrypoint.sh (COMFY_EXTRA_ARGS overrides it).
-CMD ["/entrypoint.sh"]
-
 # --- Solo avatar bake-off node packs (mirror of the local Dockerfile's bake-off
 # section, adapted for a fully-baked image: the local dev image bind-mounts the
 # node FILES and bakes only the deps; here BOTH are baked). Cloned at the exact
@@ -152,3 +139,22 @@ RUN python3 -m pip install torchcodec==0.16.0
 
 # Import-chain stragglers traced from both packs' module-level imports (local Dockerfile).
 RUN python3 -m pip install loguru matplotlib scikit-image onnxruntime
+
+# --- entrypoint (LAST on purpose) ------------------------------------------------
+# Batch-parallel rendering (adsfactory Phase 7): COMFY_INSTANCES (pod env,
+# default 1 -- unchanged single-process behaviour) spawns that many independent
+# ComfyUI processes on ports 8188.. , EACH PINNED TO ITS OWN GPU
+# (CUDA_VISIBLE_DEVICES=<i-th visible device>) and each with its own
+# input/output/user/temp dir (models stay shared, read from the network volume)
+# so adsfactory's providers/gpu_slots.py can route N concurrent renders to N
+# different instances with zero filename-collision or VRAM-overcommit risk. One
+# ComfyUI holding Wan/InfiniteTalk BF16 needs ~47GB of an 80GB H100, so
+# COMFY_INSTANCES is clamped DOWN to the visible GPU count -- loudly, never
+# silently. See entrypoint.sh (behaviour) and test_entrypoint.sh (the mapping).
+#
+# Kept as the FINAL layers on purpose: an entrypoint-only change then rebuilds
+# three tiny layers instead of the whole ~20GB tail behind it.
+EXPOSE 8188-8195
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+CMD ["/entrypoint.sh"]

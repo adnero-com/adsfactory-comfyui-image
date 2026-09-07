@@ -9,7 +9,19 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/adsfactory-comfyui
 
 jobs:
+  # Fast gate (seconds, no GPU, no image): entrypoint.sh's instance -> port ->
+  # GPU mapping, including the CLAMP that stops COMFY_INSTANCES from
+  # overcommitting a card. A broken mapping must never reach a rented pod, so
+  # this blocks the (~25 min, ~20GB) build below rather than running beside it.
+  entrypoint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the instance -> port -> GPU mapping
+        run: ./test_entrypoint.sh
+
   build-and-push:
+    needs: entrypoint-test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,6 +61,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build + push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -57,3 +70,13 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
+
+      # The digest is what a pod actually pulls -- surface it in the log and the
+      # run summary so a deploy can cite the exact image it validated.
+      - name: Report the pushed digest
+        run: |
+          echo "digest: ${{ steps.build.outputs.digest }}"
+          echo "### Pushed ${{ env.IMAGE }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- digest: \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tags: \`latest\`, \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

@@ -9,16 +9,28 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/adsfactory-comfyui
 
 jobs:
-  # Fast gate (seconds, no GPU, no image): entrypoint.sh's instance -> port ->
-  # GPU mapping, including the CLAMP that stops COMFY_INSTANCES from
-  # overcommitting a card. A broken mapping must never reach a rented pod, so
-  # this blocks the (~25 min, ~20GB) build below rather than running beside it.
+  # Fast gate (seconds, no GPU, no image). Two layers, both blocking the
+  # (~25 min, ~20GB) build below rather than running beside it:
+  #
+  #   1. the PURE helpers -- the complete per-instance ComfyUI argv (frozen
+  #      against a healthy production pod's own /system_stats), the device-token
+  #      verification, and the instance -> port -> GPU mapping incl. the CLAMP
+  #      that stops COMFY_INSTANCES from overcommitting a card;
+  #   2. a real SPAWN -- the entrypoint is actually executed against a stub
+  #      ComfyUI that records its argv/CUDA_VISIBLE_DEVICES and opens a real
+  #      socket, so "the mapping is right but nothing is listening" fails here
+  #      instead of on a rented pod. That is exactly what happened on
+  #      2026-09-07 (pod bet287qx74j8v5): unit tests green, container
+  #      unreachable, 900s of 404s. Needs root (it creates /ComfyUI, the image's
+  #      WORKDIR, and binds 8188/8189) -- hence sudo.
   entrypoint-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test the instance -> port -> GPU mapping
+      - name: Unit-test the argv, the device verification and the mapping
         run: bash ./test_entrypoint.sh
+      - name: Spawn-test the real argv + that every instance actually LISTENS
+        run: sudo -E bash ./test_entrypoint_spawn.sh
 
   build-and-push:
     needs: entrypoint-test
